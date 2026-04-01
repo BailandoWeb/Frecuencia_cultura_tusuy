@@ -1,0 +1,1013 @@
+'''from fastapi import FastAPI, APIRouter, HTTPException, Depends, UploadFile, File, Query
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field, ConfigDict, EmailStr
+from typing import List, Optional
+import uuid
+from datetime import datetime, timezone, timedelta
+import jwt
+import bcrypt
+import base64
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# JWT Configuration
+JWT_SECRET = os.environ.get('JWT_SECRET', 'frecuencia-cultura-secret-key-2024')
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 72
+
+# Create the main app
+app = FastAPI(title="Frecuencia Cultura API")
+
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
+
+# Security
+security = HTTPBearer(auto_error=False)
+
+# ============ MODELS ============
+
+class UserBase(BaseModel):
+    email: EmailStr
+    name: str
+    role: str = "user"  # user, organizer, admin
+    country: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+    instagram: Optional[str] = None
+    website: Optional[str] = None
+
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
+    name: str
+    role: str = "user"
+    country: Optional[str] = None
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    email: str
+    name: str
+    role: str
+    country: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+    instagram: Optional[str] = None
+    website: Optional[str] = None
+    events_count: int = 0
+    plan: str = "free"
+    plan_started: Optional[str] = None
+    created_at: str
+
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    country: Optional[str] = None
+    bio: Optional[str] = None
+    avatar_url: Optional[str] = None
+    instagram: Optional[str] = None
+    website: Optional[str] = None
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: UserResponse
+
+class CategoryBase(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    name: str
+    icon: str
+    slug: str
+    description: Optional[str] = None
+
+class EventBase(BaseModel):
+    title: str
+    description: str
+    image_url: Optional[str] = None
+    category_id: str
+    date: str
+    time: str
+    location: str
+    district: str
+    price: float = 0
+    external_link: Optional[str] = None
+    is_free: bool = True
+
+class EventCreate(EventBase):
+    pass
+
+class EventResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    title: str
+    description: str
+    image_url: Optional[str] = None
+    category_id: str
+    category_name: Optional[str] = None
+    date: str
+    time: str
+    location: str
+    district: str
+    organizer_id: str
+    organizer_name: Optional[str] = None
+    organizer_avatar: Optional[str] = None
+    featured: bool = False
+    price: float = 0
+    external_link: Optional[str] = None
+    is_free: bool = True
+    views: int = 0
+    saves: int = 0
+    created_at: str
+
+class EventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    image_url: Optional[str] = None
+    category_id: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    location: Optional[str] = None
+    district: Optional[str] = None
+    price: Optional[float] = None
+    external_link: Optional[str] = None
+    is_free: Optional[bool] = None
+
+class FavoriteResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: str
+    user_id: str
+    event_id: str
+    created_at: str
+
+class ContactMessage(BaseModel):
+    name: str
+    email: EmailStr
+    subject: str
+    message: str
+
+class PlanUpgradeResponse(BaseModel):
+    success: bool
+    message: str
+    plan: str
+
+class StatsResponse(BaseModel):
+    total_events: int
+    total_views: int
+    total_saves: int
+    events_this_month: int
+
+# ============ HELPERS ============
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def create_token(user_id: str, email: str, role: str) -> str:
+    payload = {
+        "user_id": user_id,
+        "email": email,
+        "role": role,
+        "exp": datetime.now(timezone.utc) + timedelta(hours=JWT_EXPIRATION_HOURS)
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials:
+        raise HTTPException(status_code=401, detail="No autorizado")
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+        if not user:
+            raise HTTPException(status_code=401, detail="Usuario no encontrado")
+        return user
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
+async def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not credentials:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user = await db.users.find_one({"id": payload["user_id"]}, {"_id": 0})
+        return user
+    except:
+        return None
+
+# ============ AUTH ROUTES ============
+
+@api_router.post("/auth/register", response_model=TokenResponse)
+async def register(user_data: UserCreate):
+    existing = await db.users.find_one({"email": user_data.email})
+    if existing:
+        raise HTTPException(status_code=400, detail="El email ya está registrado")
+    
+    user_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    user_doc = {
+        "id": user_id,
+        "email": user_data.email,
+        "password": hash_password(user_data.password),
+        "name": user_data.name,
+        "role": user_data.role,
+        "country": user_data.country,
+        "bio": None,
+        "avatar_url": None,
+        "instagram": None,
+        "website": None,
+        "events_count": 0,
+        "plan": "free",
+        "plan_started": None,
+        "created_at": now
+    }
+    
+    await db.users.insert_one(user_doc)
+    
+    token = create_token(user_id, user_data.email, user_data.role)
+    
+    user_response = UserResponse(
+        id=user_id,
+        email=user_data.email,
+        name=user_data.name,
+        role=user_data.role,
+        country=user_data.country,
+        events_count=0,
+        plan="free",
+        created_at=now
+    )
+    
+    return TokenResponse(access_token=token, user=user_response)
+
+@api_router.post("/auth/login", response_model=TokenResponse)
+async def login(credentials: UserLogin):
+    user = await db.users.find_one({"email": credentials.email}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    
+    if not verify_password(credentials.password, user["password"]):
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    
+    token = create_token(user["id"], user["email"], user["role"])
+    
+    events_count = await db.events.count_documents({"organizer_id": user["id"]})
+    
+    user_response = UserResponse(
+        id=user["id"],
+        email=user["email"],
+        name=user["name"],
+        role=user["role"],
+        country=user.get("country"),
+        bio=user.get("bio"),
+        avatar_url=user.get("avatar_url"),
+        instagram=user.get("instagram"),
+        website=user.get("website"),
+        events_count=events_count,
+        plan=user.get("plan", "free"),
+        plan_started=user.get("plan_started"),
+        created_at=user["created_at"]
+    )
+    
+    return TokenResponse(access_token=token, user=user_response)
+
+@api_router.get("/auth/me", response_model=UserResponse)
+async def get_me(current_user: dict = Depends(get_current_user)):
+    events_count = await db.events.count_documents({"organizer_id": current_user["id"]})
+    return UserResponse(
+        id=current_user["id"],
+        email=current_user["email"],
+        name=current_user["name"],
+        role=current_user["role"],
+        country=current_user.get("country"),
+        bio=current_user.get("bio"),
+        avatar_url=current_user.get("avatar_url"),
+        instagram=current_user.get("instagram"),
+        website=current_user.get("website"),
+        events_count=events_count,
+        plan=current_user.get("plan", "free"),
+        plan_started=current_user.get("plan_started"),
+        created_at=current_user["created_at"]
+    )
+
+@api_router.put("/auth/profile", response_model=UserResponse)
+async def update_profile(update_data: UserUpdate, current_user: dict = Depends(get_current_user)):
+    update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
+    if update_dict:
+        await db.users.update_one({"id": current_user["id"]}, {"$set": update_dict})
+    
+    updated_user = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    events_count = await db.events.count_documents({"organizer_id": current_user["id"]})
+    
+    return UserResponse(
+        id=updated_user["id"],
+        email=updated_user["email"],
+        name=updated_user["name"],
+        role=updated_user["role"],
+        country=updated_user.get("country"),
+        bio=updated_user.get("bio"),
+        avatar_url=updated_user.get("avatar_url"),
+        instagram=updated_user.get("instagram"),
+        website=updated_user.get("website"),
+        events_count=events_count,
+        plan=updated_user.get("plan", "free"),
+        plan_started=updated_user.get("plan_started"),
+        created_at=updated_user["created_at"]
+    )
+
+# ============ CATEGORIES ROUTES ============
+
+@api_router.get("/categories", response_model=List[CategoryBase])
+async def get_categories():
+    categories = await db.categories.find({}, {"_id": 0}).to_list(100)
+    return categories
+
+@api_router.get("/categories/{slug}", response_model=CategoryBase)
+async def get_category(slug: str):
+    category = await db.categories.find_one({"slug": slug}, {"_id": 0})
+    if not category:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    return category
+
+# ============ EVENTS ROUTES ============
+
+@api_router.get("/events", response_model=List[EventResponse])
+async def get_events(
+    category: Optional[str] = None,
+    district: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    is_free: Optional[bool] = None,
+    featured: Optional[bool] = None,
+    search: Optional[str] = None,
+    organizer_id: Optional[str] = None,
+    limit: int = Query(default=50, le=100),
+    skip: int = 0
+):
+    query = {}
+    
+    if category:
+        cat = await db.categories.find_one({"slug": category}, {"_id": 0})
+        if cat:
+            query["category_id"] = cat["id"]
+    
+    if district:
+        query["district"] = district
+    
+    if date_from:
+        query["date"] = {"$gte": date_from}
+    
+    if date_to:
+        if "date" in query:
+            query["date"]["$lte"] = date_to
+        else:
+            query["date"] = {"$lte": date_to}
+    
+    if is_free is not None:
+        query["is_free"] = is_free
+    
+    if featured is not None:
+        query["featured"] = featured
+    
+    if organizer_id:
+        query["organizer_id"] = organizer_id
+    
+    if search:
+        query["$or"] = [
+            {"title": {"$regex": search, "$options": "i"}},
+            {"description": {"$regex": search, "$options": "i"}}
+        ]
+    
+    events = await db.events.find(query, {"_id": 0}).sort("date", 1).skip(skip).limit(limit).to_list(limit)
+    
+    # Enrich with category and organizer info
+    for event in events:
+        cat = await db.categories.find_one({"id": event["category_id"]}, {"_id": 0})
+        if cat:
+            event["category_name"] = cat["name"]
+        
+        org = await db.users.find_one({"id": event["organizer_id"]}, {"_id": 0})
+        if org:
+            event["organizer_name"] = org["name"]
+            event["organizer_avatar"] = org.get("avatar_url")
+    
+    return events
+
+@api_router.get("/events/featured", response_model=List[EventResponse])
+async def get_featured_events(limit: int = 6):
+    events = await db.events.find({"featured": True}, {"_id": 0}).sort("date", 1).limit(limit).to_list(limit)
+    
+    for event in events:
+        cat = await db.categories.find_one({"id": event["category_id"]}, {"_id": 0})
+        if cat:
+            event["category_name"] = cat["name"]
+        
+        org = await db.users.find_one({"id": event["organizer_id"]}, {"_id": 0})
+        if org:
+            event["organizer_name"] = org["name"]
+            event["organizer_avatar"] = org.get("avatar_url")
+    
+    return events
+
+@api_router.get("/events/{event_id}", response_model=EventResponse)
+async def get_event(event_id: str):
+    event = await db.events.find_one({"id": event_id}, {"_id": 0})
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    # Increment views
+    await db.events.update_one({"id": event_id}, {"$inc": {"views": 1}})
+    
+    cat = await db.categories.find_one({"id": event["category_id"]}, {"_id": 0})
+    if cat:
+        event["category_name"] = cat["name"]
+    
+    org = await db.users.find_one({"id": event["organizer_id"]}, {"_id": 0})
+    if org:
+        event["organizer_name"] = org["name"]
+        event["organizer_avatar"] = org.get("avatar_url")
+    
+    return event
+
+@api_router.post("/events", response_model=EventResponse)
+async def create_event(event_data: EventCreate, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["organizer", "admin"]:
+        raise HTTPException(status_code=403, detail="Solo organizadores pueden crear eventos")
+    
+    # Check plan limits (free plan: 2 events/month)
+    if current_user.get("plan", "free") == "free":
+        now = datetime.now(timezone.utc)
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        events_this_month = await db.events.count_documents({
+            "organizer_id": current_user["id"],
+            "created_at": {"$gte": month_start}
+        })
+        if events_this_month >= 2:
+            raise HTTPException(
+                status_code=403, 
+                detail="Has alcanzado el límite del plan gratuito. Amplifica tu frecuencia con el Plan Pro."
+            )
+    
+    event_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc).isoformat()
+    
+    event_doc = {
+        "id": event_id,
+        **event_data.model_dump(),
+        "organizer_id": current_user["id"],
+        "featured": False,
+        "views": 0,
+        "saves": 0,
+        "created_at": now
+    }
+    
+    await db.events.insert_one(event_doc)
+    
+    # Update organizer events count
+    await db.users.update_one({"id": current_user["id"]}, {"$inc": {"events_count": 1}})
+    
+    cat = await db.categories.find_one({"id": event_data.category_id}, {"_id": 0})
+    event_doc["category_name"] = cat["name"] if cat else None
+    event_doc["organizer_name"] = current_user["name"]
+    event_doc["organizer_avatar"] = current_user.get("avatar_url")
+    
+    return event_doc
+
+@api_router.put("/events/{event_id}", response_model=EventResponse)
+async def update_event(event_id: str, update_data: EventUpdate, current_user: dict = Depends(get_current_user)):
+    event = await db.events.find_one({"id": event_id}, {"_id": 0})
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    if event["organizer_id"] != current_user["id"] and current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="No tienes permiso para editar este evento")
+    
+    update_dict = {k: v for k, v in update_data.model_dump().items() if v is not None}
+    if update_dict:
+        await db.events.update_one({"id": event_id}, {"$set": update_dict})
+    
+    updated_event = await db.events.find_one({"id": event_id}, {"_id": 0})
+    
+    cat = await db.categories.find_one({"id": updated_event["category_id"]}, {"_id": 0})
+    updated_event["category_name"] = cat["name"] if cat else None
+    updated_event["organizer_name"] = current_user["name"]
+    updated_event["organizer_avatar"] = current_user.get("avatar_url")
+    
+    return updated_event
+
+@api_router.delete("/events/{event_id}")
+async def delete_event(event_id: str, current_user: dict = Depends(get_current_user)):
+    event = await db.events.find_one({"id": event_id}, {"_id": 0})
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    if event["organizer_id"] != current_user["id"] and current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="No tienes permiso para eliminar este evento")
+    
+    await db.events.delete_one({"id": event_id})
+    await db.favorites.delete_many({"event_id": event_id})
+    await db.users.update_one({"id": current_user["id"]}, {"$inc": {"events_count": -1}})
+    
+    return {"success": True, "message": "Evento eliminado"}
+
+# ============ ORGANIZERS ROUTES ============
+
+@api_router.get("/organizers", response_model=List[UserResponse])
+async def get_organizers(
+    country: Optional[str] = None,
+    featured: Optional[bool] = None,
+    limit: int = Query(default=20, le=50),
+    skip: int = 0
+):
+    query = {"role": "organizer"}
+    
+    if country:
+        query["country"] = country
+    
+    organizers = await db.users.find(query, {"_id": 0, "password": 0}).skip(skip).limit(limit).to_list(limit)
+    
+    result = []
+    for org in organizers:
+        events_count = await db.events.count_documents({"organizer_id": org["id"]})
+        result.append(UserResponse(
+            id=org["id"],
+            email=org["email"],
+            name=org["name"],
+            role=org["role"],
+            country=org.get("country"),
+            bio=org.get("bio"),
+            avatar_url=org.get("avatar_url"),
+            instagram=org.get("instagram"),
+            website=org.get("website"),
+            events_count=events_count,
+            plan=org.get("plan", "free"),
+            plan_started=org.get("plan_started"),
+            created_at=org["created_at"]
+        ))
+    
+    return result
+
+@api_router.get("/organizers/{organizer_id}", response_model=UserResponse)
+async def get_organizer(organizer_id: str):
+    org = await db.users.find_one({"id": organizer_id, "role": "organizer"}, {"_id": 0, "password": 0})
+    if not org:
+        raise HTTPException(status_code=404, detail="Organizador no encontrado")
+    
+    events_count = await db.events.count_documents({"organizer_id": org["id"]})
+    
+    return UserResponse(
+        id=org["id"],
+        email=org["email"],
+        name=org["name"],
+        role=org["role"],
+        country=org.get("country"),
+        bio=org.get("bio"),
+        avatar_url=org.get("avatar_url"),
+        instagram=org.get("instagram"),
+        website=org.get("website"),
+        events_count=events_count,
+        plan=org.get("plan", "free"),
+        plan_started=org.get("plan_started"),
+        created_at=org["created_at"]
+    )
+
+# ============ FAVORITES ROUTES ============
+
+@api_router.get("/favorites", response_model=List[EventResponse])
+async def get_favorites(current_user: dict = Depends(get_current_user)):
+    favorites = await db.favorites.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(100)
+    event_ids = [f["event_id"] for f in favorites]
+    
+    events = await db.events.find({"id": {"$in": event_ids}}, {"_id": 0}).to_list(100)
+    
+    for event in events:
+        cat = await db.categories.find_one({"id": event["category_id"]}, {"_id": 0})
+        if cat:
+            event["category_name"] = cat["name"]
+        
+        org = await db.users.find_one({"id": event["organizer_id"]}, {"_id": 0})
+        if org:
+            event["organizer_name"] = org["name"]
+            event["organizer_avatar"] = org.get("avatar_url")
+    
+    return events
+
+@api_router.post("/favorites/{event_id}")
+async def add_favorite(event_id: str, current_user: dict = Depends(get_current_user)):
+    event = await db.events.find_one({"id": event_id}, {"_id": 0})
+    if not event:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    existing = await db.favorites.find_one({"user_id": current_user["id"], "event_id": event_id})
+    if existing:
+        raise HTTPException(status_code=400, detail="Ya guardaste este evento")
+    
+    favorite_doc = {
+        "id": str(uuid.uuid4()),
+        "user_id": current_user["id"],
+        "event_id": event_id,
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.favorites.insert_one(favorite_doc)
+    await db.events.update_one({"id": event_id}, {"$inc": {"saves": 1}})
+    
+    return {"success": True, "message": "Evento guardado"}
+
+@api_router.delete("/favorites/{event_id}")
+async def remove_favorite(event_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.favorites.delete_one({"user_id": current_user["id"], "event_id": event_id})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Favorito no encontrado")
+    
+    await db.events.update_one({"id": event_id}, {"$inc": {"saves": -1}})
+    
+    return {"success": True, "message": "Evento eliminado de guardados"}
+
+@api_router.get("/favorites/check/{event_id}")
+async def check_favorite(event_id: str, current_user: dict = Depends(get_current_user)):
+    existing = await db.favorites.find_one({"user_id": current_user["id"], "event_id": event_id})
+    return {"is_favorite": existing is not None}
+
+# ============ STATS ROUTES (Organizer) ============
+
+@api_router.get("/stats/organizer", response_model=StatsResponse)
+async def get_organizer_stats(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["organizer", "admin"]:
+        raise HTTPException(status_code=403, detail="Solo organizadores pueden ver estadísticas")
+    
+    total_events = await db.events.count_documents({"organizer_id": current_user["id"]})
+    
+    pipeline = [
+        {"$match": {"organizer_id": current_user["id"]}},
+        {"$group": {"_id": None, "total_views": {"$sum": "$views"}, "total_saves": {"$sum": "$saves"}}}
+    ]
+    stats = await db.events.aggregate(pipeline).to_list(1)
+    
+    total_views = stats[0]["total_views"] if stats else 0
+    total_saves = stats[0]["total_saves"] if stats else 0
+    
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+    events_this_month = await db.events.count_documents({
+        "organizer_id": current_user["id"],
+        "created_at": {"$gte": month_start}
+    })
+    
+    return StatsResponse(
+        total_events=total_events,
+        total_views=total_views,
+        total_saves=total_saves,
+        events_this_month=events_this_month
+    )
+
+# ============ PLAN ROUTES ============
+
+@api_router.post("/plan/upgrade", response_model=PlanUpgradeResponse)
+async def upgrade_plan(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] not in ["organizer", "admin"]:
+        raise HTTPException(status_code=403, detail="Solo organizadores pueden actualizar plan")
+    
+    # MOCK: In future, integrate Stripe here
+    now = datetime.now(timezone.utc).isoformat()
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"plan": "pro", "plan_started": now}}
+    )
+    
+    return PlanUpgradeResponse(
+        success=True,
+        message="Tu frecuencia ahora tiene mayor alcance. Plan Pro activado.",
+        plan="pro"
+    )
+
+@api_router.post("/plan/cancel", response_model=PlanUpgradeResponse)
+async def cancel_plan(current_user: dict = Depends(get_current_user)):
+    await db.users.update_one(
+        {"id": current_user["id"]},
+        {"$set": {"plan": "free", "plan_started": None}}
+    )
+    
+    return PlanUpgradeResponse(
+        success=True,
+        message="Plan cancelado. Volviste al plan gratuito.",
+        plan="free"
+    )
+
+# ============ CONTACT ROUTE ============
+
+@api_router.post("/contact")
+async def send_contact_message(message: ContactMessage):
+    contact_doc = {
+        "id": str(uuid.uuid4()),
+        **message.model_dump(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "read": False
+    }
+    await db.contact_messages.insert_one(contact_doc)
+    return {"success": True, "message": "Mensaje enviado correctamente"}
+
+# ============ UPLOAD ROUTE ============
+
+@api_router.post("/upload")
+async def upload_image(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    if not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Solo se permiten imágenes")
+    
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:  # 5MB limit
+        raise HTTPException(status_code=400, detail="La imagen es demasiado grande (máx 5MB)")
+    
+    # Store as base64 data URL
+    b64 = base64.b64encode(contents).decode('utf-8')
+    data_url = f"data:{file.content_type};base64,{b64}"
+    
+    return {"url": data_url}
+
+# ============ DISTRICTS ROUTE ============
+
+@api_router.get("/districts")
+async def get_districts():
+    return [
+        {"id": "centro", "name": "Centro"},
+        {"id": "arganzuela", "name": "Arganzuela"},
+        {"id": "retiro", "name": "Retiro"},
+        {"id": "salamanca", "name": "Salamanca"},
+        {"id": "chamartin", "name": "Chamartín"},
+        {"id": "tetuan", "name": "Tetuán"},
+        {"id": "chamberi", "name": "Chamberí"},
+        {"id": "fuencarral", "name": "Fuencarral-El Pardo"},
+        {"id": "moncloa", "name": "Moncloa-Aravaca"},
+        {"id": "latina", "name": "Latina"},
+        {"id": "carabanchel", "name": "Carabanchel"},
+        {"id": "usera", "name": "Usera"},
+        {"id": "puente-vallecas", "name": "Puente de Vallecas"},
+        {"id": "moratalaz", "name": "Moratalaz"},
+        {"id": "ciudad-lineal", "name": "Ciudad Lineal"},
+        {"id": "hortaleza", "name": "Hortaleza"},
+        {"id": "villaverde", "name": "Villaverde"},
+        {"id": "lavapies", "name": "Lavapiés"},
+        {"id": "malasana", "name": "Malasaña"},
+        {"id": "chueca", "name": "Chueca"}
+    ]
+
+# ============ SEED DATA ============
+
+@api_router.post("/seed")
+async def seed_data():
+    # Check if already seeded
+    existing_categories = await db.categories.count_documents({})
+    if existing_categories > 0:
+        return {"message": "Datos ya existentes"}
+    
+    # Categories
+    categories = [
+        {"id": "cat-danza", "name": "Danza", "icon": "music", "slug": "danza", "description": "Espectáculos de danza, ensayos abiertos y clases"},
+        {"id": "cat-teatro", "name": "Teatro", "icon": "theater", "slug": "teatro", "description": "Obras de teatro, performances y artes escénicas"},
+        {"id": "cat-musica", "name": "Música", "icon": "mic", "slug": "musica", "description": "Conciertos, recitales y eventos musicales"},
+        {"id": "cat-casting", "name": "Casting", "icon": "users", "slug": "casting", "description": "Audiciones y convocatorias artísticas"},
+        {"id": "cat-talleres", "name": "Talleres", "icon": "book-open", "slug": "talleres", "description": "Formación, workshops y clases magistrales"},
+        {"id": "cat-comunidad", "name": "Comunidad", "icon": "heart", "slug": "comunidad", "description": "Encuentros, networking y eventos comunitarios"}
+    ]
+    await db.categories.insert_many(categories)
+    
+    # Sample Organizers
+    now = datetime.now(timezone.utc).isoformat()
+    organizers = [
+        {
+            "id": "org-tusuy",
+            "email": "tusuy@frecuenciacultura.com",
+            "password": hash_password("demo123"),
+            "name": "Tusuy Ñan",
+            "role": "organizer",
+            "country": "Argentina",
+            "bio": "Escuela de danzas sudamericanas. Conectamos raíces y ritmos desde Madrid.",
+            "avatar_url": "https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?w=200&h=200&fit=crop",
+            "instagram": "@tusuynan",
+            "website": "https://tusuynan.com",
+            "events_count": 0,
+            "plan": "pro",
+            "plan_started": now,
+            "created_at": now
+        },
+        {
+            "id": "org-raices",
+            "email": "raices@frecuenciacultura.com",
+            "password": hash_password("demo123"),
+            "name": "Raíces Latinas",
+            "role": "organizer",
+            "country": "Perú",
+            "bio": "Difundiendo la cultura peruana en España a través de la danza y música tradicional.",
+            "avatar_url": "https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200&h=200&fit=crop",
+            "instagram": "@raiceslatinas",
+            "website": None,
+            "events_count": 0,
+            "plan": "free",
+            "plan_started": None,
+            "created_at": now
+        },
+        {
+            "id": "org-escena",
+            "email": "escena@frecuenciacultura.com",
+            "password": hash_password("demo123"),
+            "name": "Escena Alternativa",
+            "role": "organizer",
+            "country": "España",
+            "bio": "Teatro independiente y artes escénicas experimentales en Madrid.",
+            "avatar_url": "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&h=200&fit=crop",
+            "instagram": "@escenaalternativa",
+            "website": "https://escenaalternativa.es",
+            "events_count": 0,
+            "plan": "free",
+            "plan_started": None,
+            "created_at": now
+        }
+    ]
+    await db.users.insert_many(organizers)
+    
+    # Sample Events
+    events = [
+        {
+            "id": "evt-1",
+            "title": "Taller de Caporal - Nivel Iniciación",
+            "description": "Aprende los pasos básicos de la danza boliviana del Caporal. Clase abierta para todos los niveles. Trae ropa cómoda y muchas ganas de bailar.",
+            "image_url": "https://images.pexels.com/photos/13557356/pexels-photo-13557356.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+            "category_id": "cat-danza",
+            "date": "2026-02-15",
+            "time": "19:00",
+            "location": "Centro Cultural La Latina",
+            "district": "latina",
+            "organizer_id": "org-tusuy",
+            "featured": True,
+            "price": 15,
+            "external_link": None,
+            "is_free": False,
+            "views": 234,
+            "saves": 45,
+            "created_at": now
+        },
+        {
+            "id": "evt-2",
+            "title": "Noche de Teatro: Fragmentos",
+            "description": "Una obra que explora la memoria y la identidad a través de monólogos entrelazados. 60 minutos de teatro íntimo y contemporáneo.",
+            "image_url": "https://images.unsplash.com/photo-1577537653888-383504d823ae?w=800&h=600&fit=crop",
+            "category_id": "cat-teatro",
+            "date": "2026-02-20",
+            "time": "20:30",
+            "location": "Sala Mirador",
+            "district": "lavapies",
+            "organizer_id": "org-escena",
+            "featured": True,
+            "price": 12,
+            "external_link": "https://salamirador.com/entradas",
+            "is_free": False,
+            "views": 156,
+            "saves": 32,
+            "created_at": now
+        },
+        {
+            "id": "evt-3",
+            "title": "Festejo Peruano - Ensayo Abierto",
+            "description": "Ven a conocer la alegría del festejo peruano. Ensayo abierto donde podrás ver y participar en esta danza afroperuana llena de energía.",
+            "image_url": "https://images.unsplash.com/photo-1593408995262-1d8933c37afc?w=800&h=600&fit=crop",
+            "category_id": "cat-danza",
+            "date": "2026-02-22",
+            "time": "18:00",
+            "location": "Espacio Cultural Usera",
+            "district": "usera",
+            "organizer_id": "org-raices",
+            "featured": True,
+            "price": 0,
+            "external_link": None,
+            "is_free": True,
+            "views": 189,
+            "saves": 67,
+            "created_at": now
+        },
+        {
+            "id": "evt-4",
+            "title": "Casting: Musical Latinoamericano",
+            "description": "Buscamos bailarines y cantantes para nueva producción musical. Se requiere experiencia en danza latina y capacidad vocal. Enviar CV artístico previo.",
+            "image_url": "https://images.unsplash.com/photo-1646566065259-7250620aa675?w=800&h=600&fit=crop",
+            "category_id": "cat-casting",
+            "date": "2026-03-01",
+            "time": "10:00",
+            "location": "Teatro Nuevo Alcalá",
+            "district": "centro",
+            "organizer_id": "org-escena",
+            "featured": False,
+            "price": 0,
+            "external_link": None,
+            "is_free": True,
+            "views": 312,
+            "saves": 89,
+            "created_at": now
+        },
+        {
+            "id": "evt-5",
+            "title": "Concierto: Fusión Andina",
+            "description": "Música andina contemporánea con instrumentos tradicionales. Un viaje sonoro desde los Andes hasta Madrid.",
+            "image_url": "https://images.pexels.com/photos/953457/pexels-photo-953457.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+            "category_id": "cat-musica",
+            "date": "2026-03-05",
+            "time": "21:00",
+            "location": "Café Central",
+            "district": "centro",
+            "organizer_id": "org-raices",
+            "featured": False,
+            "price": 18,
+            "external_link": "https://cafecentral.com",
+            "is_free": False,
+            "views": 98,
+            "saves": 23,
+            "created_at": now
+        },
+        {
+            "id": "evt-6",
+            "title": "Workshop: Folklore Argentino",
+            "description": "Taller intensivo de chacarera y zamba. Aprende las danzas más emblemáticas de Argentina con profesores certificados.",
+            "image_url": "https://images.unsplash.com/photo-1704253797699-f983e3cd70ff?w=800&h=600&fit=crop",
+            "category_id": "cat-talleres",
+            "date": "2026-03-10",
+            "time": "16:00",
+            "location": "Academia Tusuy Ñan",
+            "district": "chamberi",
+            "organizer_id": "org-tusuy",
+            "featured": True,
+            "price": 25,
+            "external_link": None,
+            "is_free": False,
+            "views": 145,
+            "saves": 56,
+            "created_at": now
+        }
+    ]
+    await db.events.insert_many(events)
+    
+    # Update organizer event counts
+    await db.users.update_one({"id": "org-tusuy"}, {"$set": {"events_count": 2}})
+    await db.users.update_one({"id": "org-raices"}, {"$set": {"events_count": 2}})
+    await db.users.update_one({"id": "org-escena"}, {"$set": {"events_count": 2}})
+    
+    return {"message": "Datos de ejemplo creados correctamente"}
+
+# ============ ROOT ============
+
+@api_router.get("/")
+async def root():
+    return {"message": "Frecuencia Cultura API", "version": "1.0.0"}
+
+# Include the router
+app.include_router(api_router)
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@app.on_event("startup")
+async def startup():
+    # Create indexes
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("id", unique=True)
+    await db.events.create_index("id", unique=True)
+    await db.events.create_index("organizer_id")
+    await db.events.create_index("category_id")
+    await db.events.create_index("date")
+    await db.categories.create_index("id", unique=True)
+    await db.categories.create_index("slug", unique=True)
+    await db.favorites.create_index([("user_id", 1), ("event_id", 1)], unique=True)
+    logger.info("Frecuencia Cultura API started")
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close() '''
