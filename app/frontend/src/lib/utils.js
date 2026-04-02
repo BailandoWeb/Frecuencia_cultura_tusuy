@@ -58,16 +58,16 @@ export const categoryIcons = {
 };
 
 export const countries = [
-  'Espana',
+  'España',
   'Argentina',
-  'Peru',
+  'Perú',
   'Bolivia',
   'Ecuador',
   'Chile',
   'Uruguay',
   'Colombia',
   'Paraguay',
-  'Mexico',
+  'México',
   'Venezuela',
   'Otro'
 ];
