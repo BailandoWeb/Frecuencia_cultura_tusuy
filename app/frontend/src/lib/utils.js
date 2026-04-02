@@ -1,5 +1,5 @@
-import { clsx } from "clsx";
-import { twMerge } from "tailwind-merge";
+"import { clsx } from \"clsx\";
+import { twMerge } from \"tailwind-merge\";
 
 export function cn(...inputs) {
   return twMerge(clsx(inputs));
@@ -33,11 +33,13 @@ export function formatPrice(price) {
 }
 
 export function truncateText(text, maxLength) {
+  if (!text) return '';
   if (text.length <= maxLength) return text;
   return text.substring(0, maxLength) + '...';
 }
 
 export function getInitials(name) {
+  if (!name) return '';
   return name
     .split(' ')
     .map(word => word[0])
@@ -56,16 +58,17 @@ export const categoryIcons = {
 };
 
 export const countries = [
-  'España',
+  'Espana',
   'Argentina',
-  'Perú',
+  'Peru',
   'Bolivia',
   'Ecuador',
   'Chile',
   'Uruguay',
   'Colombia',
   'Paraguay',
-  'México',
+  'Mexico',
   'Venezuela',
   'Otro'
 ];
+"
