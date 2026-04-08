@@ -1,29 +1,29 @@
-"import { useEffect } from \"react\";
-import \"@/App.css\";
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from \"react-router-dom\";
-import { Toaster } from \"./components/ui/sonner\";
-import { AuthProvider, useAuth } from \"./lib/auth\";
-import { Navbar } from \"./components/Navbar\";
-import { Footer } from \"./components/Footer\";
+import { useEffect } from \"react"\;
+import \"@/App.css"\;
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from \"react-router-dom"\;
+import { Toaster } from \"./components/ui/sonner"\;
+import { AuthProvider, useAuth } from \"./lib/auth"\;
+import { Navbar } from \"./components/Navbar"\;
+import { Footer } from \"./components/Footer"\;
 
 // Pages
-import HomePage from \"./pages/HomePage\";
-import EventsPage from \"./pages/EventsPage\";
-import EventDetailPage from \"./pages/EventDetailPage\";
-import OrganizersPage from \"./pages/OrganizersPage\";
-import OrganizerDetailPage from \"./pages/OrganizerDetailPage\";
-import CategoriesPage from \"./pages/CategoriesPage\";
-import LoginPage from \"./pages/LoginPage\";
-import RegisterPage from \"./pages/RegisterPage\";
-import DashboardPage from \"./pages/DashboardPage\";
-import MyEventsPage from \"./pages/MyEventsPage\";
-import CreateEventPage from \"./pages/CreateEventPage\";
-import FavoritesPage from \"./pages/FavoritesPage\";
-import StatsPage from \"./pages/StatsPage\";
-import PlanPage from \"./pages/PlanPage\";
-import ProfilePage from \"./pages/ProfilePage\";
-import AboutPage from \"./pages/AboutPage\";
-import ContactPage from \"./pages/ContactPage\";
+import HomePage from \"./pages/HomePage"\;
+import EventsPage from \"./pages/EventsPage"\;
+import EventDetailPage from \"./pages/EventDetailPage"\;
+import OrganizersPage from \"./pages/OrganizersPage"\;
+import OrganizerDetailPage from \"./pages/OrganizerDetailPage"\;
+import CategoriesPage from \"./pages/CategoriesPage"\;
+import LoginPage from \"./pages/LoginPage"\;
+import RegisterPage from \"./pages/RegisterPage"\;
+import DashboardPage from \"./pages/DashboardPage"\;
+import MyEventsPage from \"./pages/MyEventsPage"\;
+import CreateEventPage from \"./pages/CreateEventPage"\;
+import FavoritesPage from \"./pages/FavoritesPage"\;
+import StatsPage from \"./pages/StatsPage"\;
+import PlanPage from \"./pages/PlanPage"\;
+import ProfilePage from \"./pages/ProfilePage"\;
+import AboutPage from \"./pages/AboutPage"\;
+import ContactPage from \"./pages/ContactPage"\;
 import { AvisoLegalPage, PrivacidadPage, CookiesPage, TerminosPage } from \"./pages/LegalPages\";
 
 // Protected Route Component
@@ -167,4 +167,3 @@ function App() {
 }
 
 export default App;
-"
