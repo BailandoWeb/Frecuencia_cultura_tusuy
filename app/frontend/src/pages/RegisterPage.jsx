@@ -1,5 +1,4 @@
-Resumen - Actualiza RegisterPage.jsx
-Reemplaza todo el contenido del archivo app/frontend/src/pages/RegisterPage.jsx con el código corregido que te proporciono aquí:
+
 import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Eye, EyeOff, ArrowLeft } from 'lucide-react';
